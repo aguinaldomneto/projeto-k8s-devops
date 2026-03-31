@@ -1,0 +1,130 @@
+name: CI/CD DevOps Pipeline
+
+on:
+  push:
+    branches:
+      - main
+
+# 🔒 evita concorrência
+concurrency:
+  group: production-deploy
+  cancel-in-progress: true
+
+env:
+  IMAGE_NAME: aguinaldomneto/projeto-devops
+
+jobs:
+
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    outputs:
+      VERSION: ${{ steps.version.outputs.VERSION }}
+
+    steps:
+
+    - name: Checkout
+      uses: actions/checkout@v3
+
+    - name: Login Docker Hub
+      uses: docker/login-action@v2
+      with:
+        username: ${{ secrets.DOCKER_USER }}
+        password: ${{ secrets.DOCKER_PASS }}
+
+    # 🔹 gerar versão única
+    - name: Gerar versão
+      id: version
+      run: |
+        VERSION=v1.0.${{ github.run_number }}
+        echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+
+    - name: Debug versão
+      run: echo "Versão = ${{ steps.version.outputs.VERSION }}"
+
+    - name: Build imagem
+      run: |
+        docker build -t $IMAGE_NAME:${{ steps.version.outputs.VERSION }} \
+                     -t $IMAGE_NAME:latest .
+
+    - name: Push imagem
+      run: |
+        docker push $IMAGE_NAME:${{ steps.version.outputs.VERSION }}
+        docker push $IMAGE_NAME:latest
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+
+    steps:
+
+    - name: Validar VERSION
+      run: |
+        if [ -z "${{ needs.build-and-push.outputs.VERSION }}" ]; then
+          echo "❌ VERSION vazia"
+          exit 1
+        fi
+
+    - name: Deploy seguro via SSH
+      uses: appleboy/ssh-action@v1.0.0
+      with:
+        host: ${{ secrets.SERVER_IP }}
+        username: ubuntu
+        key: ${{ secrets.SSH_KEY }}
+        script: |
+          cd ~/projeto-devops
+
+          VERSION="${{ needs.build-and-push.outputs.VERSION }}"
+
+          echo "🚀 Deploy versão: $VERSION"
+
+          if [ -z "$VERSION" ]; then
+            echo "❌ VERSION inválida"
+            exit 1
+          fi
+
+          # 🔍 garante que a imagem existe antes de parar tudo
+          docker pull aguinaldomneto/projeto-devops:$VERSION
+
+          # 💾 backup da versão atual
+          CURRENT=$(docker ps --format "{{.Image}}" | grep projeto-devops || true)
+          echo "Versão atual: $CURRENT"
+
+          # 🔄 deploy
+          export VERSION=$VERSION
+          docker compose up -d
+
+          # ⏱️ aguarda subir
+          sleep 5
+
+          # 🔎 healthcheck simples
+          curl -f http://localhost:8080 || exit 1
+
+          echo "✅ Deploy concluído com sucesso"
+
+    # 🔥 rollback automático se falhar
+    - name: Rollback automático
+      if: failure()
+      uses: appleboy/ssh-action@v1.0.0
+      with:
+        host: ${{ secrets.SERVER_IP }}
+        username: ubuntu
+        key: ${{ secrets.SSH_KEY }}
+        script: |
+          cd ~/projeto-devops
+
+          echo "⚠️ Falha detectada, iniciando rollback..."
+
+          PREVIOUS=$(docker images aguinaldomneto/projeto-devops --format "{{.Tag}}" | sort -r | sed -n 2p)
+
+          if [ -z "$PREVIOUS" ]; then
+            echo "❌ Nenhuma versão anterior encontrada"
+            exit 1
+          fi
+
+          echo "⏪ Voltando para versão: $PREVIOUS"
+
+          export VERSION=$PREVIOUS
+          docker compose up -d
+
+          echo "✅ Rollback concluído"
