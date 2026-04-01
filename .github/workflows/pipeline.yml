@@ -1,4 +1,4 @@
-name: Deploy Kubernetes
+name: Deploy Multi Service Kubernetes
 
 on:
   push:
@@ -6,7 +6,8 @@ on:
       - main
 
 env:
-  IMAGE_NAME: aguinaldomneto/projeto-devops
+  FRONT_IMAGE: aguinaldomneto/projeto-devops
+  API_IMAGE: aguinaldomneto/projeto-api
 
 jobs:
 
@@ -31,13 +32,21 @@ jobs:
       id: version
       run: echo "VERSION=v1.0.${{ github.run_number }}" >> $GITHUB_OUTPUT
 
-    - name: Build imagem
+    # 🔥 FRONTEND
+    - name: Build frontend
       run: |
-        docker build -t $IMAGE_NAME:${{ steps.version.outputs.VERSION }} .
+        docker build -t $FRONT_IMAGE:${{ steps.version.outputs.VERSION }} .
 
-    - name: Push imagem
+    - name: Push frontend
       run: |
-        docker push $IMAGE_NAME:${{ steps.version.outputs.VERSION }}
+        docker push $FRONT_IMAGE:${{ steps.version.outputs.VERSION }}
+
+    # 🔥 BACKEND (simulado agora)
+    - name: Build API (simples)
+      run: |
+        docker pull hashicorp/http-echo
+        docker tag hashicorp/http-echo $API_IMAGE:${{ steps.version.outputs.VERSION }}
+        docker push $API_IMAGE:${{ steps.version.outputs.VERSION }}
 
   deploy:
     needs: build-and-push
@@ -52,15 +61,18 @@ jobs:
         username: ubuntu
         key: ${{ secrets.SSH_KEY }}
         script: |
-          cd ~/k8s
-
           VERSION=${{ needs.build-and-push.outputs.VERSION }}
 
           echo "Deploy versão: $VERSION"
 
-          # atualiza imagem no deployment
+          # FRONTEND
           kubectl set image deployment/devops-app \
           app=aguinaldomneto/projeto-devops:$VERSION
 
-          # aguarda rollout
+          # BACKEND
+          kubectl set image deployment/api-app \
+          api=aguinaldomneto/projeto-api:$VERSION
+
+          # acompanhar rollout
           kubectl rollout status deployment devops-app
+          kubectl rollout status deployment api-app
